@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, orientation=landscape">
+    <title>Tactical Ball: P2P MULTIPLAYER</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; width: 100%; height: 100%; background: #000; font-family: 'Impact', sans-serif; user-select: none; touch-action: none; }
+        #menu { position: absolute; inset: 0; z-index: 9999; background: radial-gradient(circle, #1a1a1a, #000); display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; }
+        .btn { padding: 15px 40px; margin: 10px; background: #222; border: 3px solid #444; color: #fff; border-radius: 12px; cursor: pointer; font-weight: bold; width: 300px; text-align: center; font-size: 22px; transition: 0.2s; text-transform: uppercase; }
+        .btn:hover { border-color: #2ecc71; color: #2ecc71; transform: scale(1.05); }
+        #game-ui { display: none; }
+        #hud { position: absolute; top: 10px; width: 100%; display: flex; justify-content: space-around; pointer-events: none; z-index: 50; }
+        .hp-bar { width: 150px; height: 15px; background: #222; border: 2px solid #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 0 15px rgba(0,0,0,0.5); }
+        .hp-fill { height: 100%; width: 100%; transition: width 0.3s cubic-bezier(0.17, 0.67, 0.83, 0.67); }
+        .joy-container { position: absolute; bottom: 30px; width: 100%; display: flex; justify-content: space-between; padding: 0 60px; box-sizing: border-box; z-index: 60; }
+        .joy-base { width: 110px; height: 110px; border: 3px solid rgba(255,255,255,0.2); border-radius: 50%; position: relative; background: rgba(255,255,255,0.05); }
+        .joy-stk { position: absolute; width: 46px; height: 44px; background: #fff; border-radius: 50%; top: 32px; left: 32px; opacity: 0.5; }
+        .actions { position: absolute; right: 40px; bottom: 150px; display: flex; flex-direction: column; gap: 15px; z-index: 100; }
+        .act-btn { width: 75px; height: 75px; border-radius: 50%; background: rgba(0,0,0,0.7); border: 2px solid #fff; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: bold; cursor: pointer; }
+        canvas { display: block; }
+        #status { position: absolute; bottom: 20px; left: 20px; color: white; background: rgba(0,0,0,0.6); padding: 5px 10px; border-radius: 8px; font-size: 12px; z-index: 100; font-family: monospace; pointer-events: none; }
+    </style>
+    <!-- Подключаем Trystero для P2P без сервера -->
+    <script src="https://unpkg.com/trystero@0.17.1/dist/trystero.min.js"></script>
+</head>
+<body>
+
+    <div id="menu">
+        <h1 style="color: #2ecc71; letter-spacing: 8px; text-shadow: 0 0 20px #2ecc71;">P2P ARENA</h1>
+        <div class="btn" id="hostBtn">СОЗДАТЬ БИТВУ</div>
+        <div class="btn" id="joinBtn">ПРИСОЕДИНИТЬСЯ</div>
+        <div style="margin-top: 30px; font-size: 14px; color: #888;">🏆 Режим 1x1. Играйте с братом где угодно!</div>
+    </div>
+
+    <div id="game-ui">
+        <div id="hud">
+            <div class="hp-bar"><div id="p-hp" class="hp-fill" style="background: #2ecc71;"></div></div>
+            <div id="m-info" style="color: #fff; font-size: 14px; text-shadow: 0 0 10px #000;"></div>
+            <div class="hp-bar"><div id="o-hp" class="hp-fill" style="background: #e74c3c;"></div></div>
+        </div>
+        <div class="joy-container">
+            <div class="joy-base"><div class="joy-stk" id="stk-l"></div></div>
+            <div class="joy-base" style="border-color: #f1c40f;"><div class="joy-stk" id="stk-r" style="background: #f1c40f;"></div></div>
+        </div>
+        <div class="actions">
+            <div class="act-btn" id="btn-h" style="border-color: #2ecc71;">ХИЛ</div>
+            <div class="act-btn" id="btn-a" style="border-color: #e74c3c;">УДАР</div>
+        </div>
+        <canvas id="canvas"></canvas>
+        <div id="status">🔍 Поиск противника...</div>
+    </div>
+
+<script>
+// ==================== ИНИЦИАЛИЗАЦИЯ P2P ====================
+const { joinRoom, onPeerJoin, onPeerLeave, makeAction } = Trystero;
+let room = null;
+let peerId = null;
+let opponentId = null;
+let isHost = false;
+let gameStarted = false;
+
+// Отправка действий противнику
+let sendAction = null;
+
+// Состояние игры
+let playing = false;
+let canvas, ctx;
+let myPlayer, opponentPlayer;
+let mapData = null;
+let rocks = [], roadDots = [], lake = null, particles = [];
+let shake = 0;
+let lastInput = { x: 0, y: 0 }; // Мой ввод для отправки
+
+const SPEED = 1.65;
+
+// Генерация карты (синхронизируем)
+const maps = [
+    { n: 'VIBE GRASS', bg: '#2d5a27', path: '#5d4037', rock: '#333', lake: true, part: '#4CAF50' },
+    { n: 'DARK VOID', bg: '#0a0a0a', path: '#1a1a1a', rock: '#000', lake: false, part: '#444' },
+    { n: 'TOXIC DESERT', bg: '#c2b280', path: '#a68d5d', rock: '#5a3d2b', lake: false, part: '#e67e22' }
+];
+
+function generateMap(seed, width, height) {
+    // Используем seed для одинаковой генерации у обоих игроков
+    const rng = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const mapIdx = Math.floor(rng() * maps.length);
+    const curMap = { ...maps[mapIdx] };
+    
+    const rocksGen = [];
+    for(let i=0; i<7; i++) {
+        let att = 0;
+        while(att < 50) {
+            let r = 25 + Math.floor(rng() * 15), x = 300 + rng() * (width - 600), y = 100 + rng() * (height - 200);
+            if (rocksGen.every(rk => Math.hypot(x - rk.x, y - rk.y) > (r + rk.r + 60))) {
+                rocksGen.push({x, y, r}); break;
+            }
+            att++;
+        }
+    }
+    const road = [];
+    for(let i=0; i<25; i++) road.push({x: rng() * width, y: height/2 + (rng() - 0.5) * 70, r: 4 + rng() * 8});
+    const lakeObj = curMap.lake ? { x: width/2, y: height/2 + (rng() - 0.5) * 100, r: 80 } : null;
+    
+    return { curMap, rocks: rocksGen, roadDots: road, lake: lakeObj };
+}
+
+// Функция создания игрока
+function createPlayer(hp, color, x, y) {
+    return {
+        x, y, r: 20, hp: hp, maxHp: hp, color: color,
+        aCd: 0, aMax: 65,
+        dCd: 0, dMax: 130,
+        hCd: 0, hMax: 1000,
+        dsh: 0, dDir: {x:0, y:0},
+        history: [],
+        emote: "", emoteT: 0,
+        rot: 0
+    };
+}
+
+// ==================== ИГРОВАЯ ЛОГИКА ====================
+function spawnPart(x, y, col, count, spd) {
+    for(let i=0; i<count; i++) {
+        const a = Math.random()*Math.PI*2; const s = Math.random()*spd;
+        particles.push({x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s, life:30, col});
+    }
+}
+
+function showEmote(ent, txt) { ent.emote = txt; ent.emoteT = 60; }
+
+// Триггер действий (отправляем оппоненту)
+function trigger(type, playerIsMe, ent, dirAngle = 0) {
+    if (!gameStarted) return;
+    if (type === 'atk') {
+        if (ent.aCd <= 0) {
+            ent.aCd = ent.aMax;
+            const target = playerIsMe ? opponentPlayer : myPlayer;
+            if (Math.hypot(ent.x - target.x, ent.y - target.y) < 65) {
+                target.hp -= 15;
+                shake = 12;
+                spawnPart(target.x, target.y, '#fff', 15, 8);
+                const angle = Math.atan2(target.y - ent.y, target.x - ent.x);
+                target.x += Math.cos(angle) * 45;
+                target.y += Math.sin(angle) * 45;
+                if (sendAction) sendAction({ type: 'damage', targetHp: target.hp, targetPos: {x: target.x, y: target.y}, shake: true });
+                if (!playerIsMe && target.hp <= 0) endGame(false);
+                if (playerIsMe && target.hp <= 0) endGame(true);
+            } else {
+                if(playerIsMe) showEmote(myPlayer, "ПРОМАХ!");
+                else showEmote(opponentPlayer, "ПРОМАХ!");
+            }
+            // Отправляем анимацию атаки
+            if (sendAction) sendAction({ type: 'attackAnim', pos: ent.x, y: ent.y, isMe: playerIsMe });
+        }
+    }
+    if (type === 'dash') {
+        if (ent.dCd <= 0) {
+            ent.dsh = 10; ent.dCd = ent.dMax; shake = 6;
+            let angle = dirAngle;
+            if (playerIsMe && dirAngle === 0) angle = Math.atan2(lastInput.y, lastInput.x);
+            if (!playerIsMe && dirAngle === 0) angle = Math.atan2(myPlayer.y - ent.y, myPlayer.x - ent.x);
+            ent.dDir = {x: Math.cos(angle), y: Math.sin(angle)};
+            spawnPart(ent.x, ent.y, '#f1c40f', 8, 3);
+            if (sendAction) sendAction({ type: 'dashAnim', pos: ent.x, y: ent.y, dir: {x: ent.dDir.x, y: ent.dDir.y}, isMe: playerIsMe });
+        }
+    }
+    if (type === 'heal') {
+        if (ent.hCd <= 0) {
+            ent.hp = Math.min(ent.maxHp, ent.hp + 25);
+            ent.hCd = ent.hMax;
+            spawnPart(ent.x, ent.y, '#2ecc71', 20, 4);
+            if (sendAction) sendAction({ type: 'heal', hp: ent.hp });
+            showEmote(ent, "+25 HP");
+        }
+    }
+}
+
+function updateCd(entity) {
+    if(entity.aCd > 0) entity.aCd--;
+    if(entity.dCd > 0) entity.dCd--;
+    if(entity.hCd > 0) entity.hCd--;
+    if(entity.emoteT > 0) entity.emoteT--;
+}
+
+function applyPhysics(entity, isLocal) {
+    entity.history.push({x: entity.x, y: entity.y}); if(entity.history.length > 6) entity.history.shift();
+    if (entity.dsh > 0) {
+        entity.x += entity.dDir.x * 13;
+        entity.y += entity.dDir.y * 13;
+        entity.dsh--;
+    }
+    const obs = lake ? [...rocks, lake] : rocks;
+    obs.forEach(r => {
+        const d = Math.hypot(entity.x - r.x, entity.y - r.y);
+        if (d < entity.r + r.r) {
+            const angle = Math.atan2(entity.y - r.y, entity.x - r.x);
+            entity.x = r.x + Math.cos(angle) * (entity.r + r.r);
+            entity.y = r.y + Math.sin(angle) * (entity.r + r.r);
+        }
+    });
+    entity.x = Math.max(entity.r, Math.min(canvas.width - entity.r, entity.x));
+    entity.y = Math.max(entity.r, Math.min(canvas.height - entity.r, entity.y));
+    updateCd(entity);
+}
+
+// Конец игры
+function endGame(win) {
+    if(!playing) return;
+    playing = false;
+    alert(win ? "ПОБЕДА! 🏆 УНИЧТОЖИЛ СОПЕРНИКА!" : "ПОРАЖЕНИЕ... 🤡 НУБАС!");
+    location.reload();
+}
+
+// ==================== ОТРИСОВКА ====================
+function draw() {
+    if(!canvas || !ctx) return;
+    ctx.save();
+    if(shake > 0) { ctx.translate(Math.random()*shake - shake/2, Math.random()*shake - shake/2); shake *= 0.9; }
+    
+    const map = mapData;
+    ctx.fillStyle = map.curMap.bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = map.curMap.path; ctx.fillRect(0, canvas.height/2-40, canvas.width, 80);
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
+    map.roadDots.forEach(d => { ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, Math.PI*2); ctx.fill(); });
+    if(map.lake) { ctx.fillStyle = '#1e88e5'; ctx.strokeStyle = '#90caf9'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(map.lake.x, map.lake.y, map.lake.r, 0, Math.PI*2); ctx.fill(); ctx.stroke(); }
+    ctx.fillStyle = map.curMap.rock;
+    map.rocks.forEach(r => { ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI*2); ctx.fill(); });
+    
+    particles.forEach((p, i) => {
+        p.x += p.vx; p.y += p.vy; p.life--;
+        if(p.life <= 0) particles.splice(i,1);
+        ctx.fillStyle = p.col; ctx.globalAlpha = p.life/30;
+        ctx.fillRect(p.x, p.y, 4, 4);
+    });
+    ctx.globalAlpha = 1;
+    
+    function drawEntity(e, isMe) {
+        if(e.dsh > 0) {
+            e.history.forEach((h, i) => { ctx.globalAlpha = i/10; ctx.fillStyle = e.color; ctx.beginPath(); ctx.arc(h.x, h.y, e.r, 0, Math.PI*2); ctx.fill(); });
+        }
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.translate(e.x, e.y);
+        if(!isMe) ctx.rotate(e.rot);
+        ctx.fillStyle = e.color;
+        ctx.beginPath(); ctx.arc(0, 0, e.r, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+        if(e.emoteT > 0) {
+            ctx.fillStyle = "#fff"; ctx.font = "bold 16px Arial"; ctx.textAlign = "center";
+            ctx.fillText(e.emote, e.x, e.y - 50);
+        }
+        const drawBar = (yOff, val, max, col) => {
+            if(val > 0) {
+                ctx.fillStyle = '#333'; ctx.fillRect(e.x - 20, e.y - yOff, 40, 5);
+                ctx.fillStyle = col; ctx.fillRect(e.x - 20, e.y - yOff, 40 * (1 - val/max), 5);
+            }
+        };
+        drawBar(30, e.aCd, e.aMax, '#fff');
+        drawBar(37, e.dCd, e.dMax, '#f1c40f');
+        drawBar(44, e.hCd, e.hMax, '#2ecc71');
+    }
+    
+    drawEntity(myPlayer, true);
+    drawEntity(opponentPlayer, false);
+    
+    ctx.restore();
+    document.getElementById('p-hp').style.width = (myPlayer.hp/myPlayer.maxHp*100)+'%';
+    document.getElementById('o-hp').style.width = (opponentPlayer.hp/opponentPlayer.maxHp*100)+'%';
+}
+
+// ==================== P2P ОБРАБОТЧИКИ ====================
+function initMultiplayer(host) {
+    isHost = host;
+    const roomName = "toxic_ball_p2p_" + "arena2025";
+    room = joinRoom(roomName, "openwebtorrent", { trackerUrls: ["wss://tracker.openwebtorrent.com"] });
+    peerId = room.getPeerId();
+    
+    sendAction = makeAction(room, "gameAction");
+    
+    onPeerJoin(room, (peer) => {
+        if(!opponentId && peer !== peerId) {
+            opponentId = peer;
+            document.getElementById('status').innerHTML = "✅ Противник найден! Игра началась!";
+            startMatch();
+        }
+    });
+    
+    onPeerLeave(room, (peer) => {
+        if(peer === opponentId) {
+            alert("Противник ушел. Возврат в меню");
+            location.reload();
+        }
+    });
+    
+    // Прием действий от соперника
+    room.onAction("gameAction", (data, peer) => {
+        if(peer !== opponentId) return;
+        if(!gameStarted) return;
+        switch(data.type) {
+            case 'move':
+                opponentPlayer.x = data.x;
+                opponentPlayer.y = data.y;
+                break;
+            case 'attack':
+                trigger('atk', false, opponentPlayer);
+                break;
+            case 'heal':
+                trigger('heal', false, opponentPlayer);
+                break;
+            case 'dash':
+                trigger('dash', false, opponentPlayer, data.angle);
+                break;
+            case 'damage':
+                myPlayer.hp = data.targetHp;
+                if(data.targetPos) { myPlayer.x = data.targetPos.x; myPlayer.y = data.targetPos.y; }
+                if(data.shake) shake = 10;
+                if(myPlayer.hp <= 0) endGame(false);
+                break;
+            case 'attackAnim':
+                spawnPart(data.pos, data.y, '#ffaa44', 12, 5);
+                break;
+            case 'dashAnim':
+                let tmpP = createPlayer(100,'#fff', data.pos, data.y);
+                tmpP.dsh = 8; tmpP.dDir = data.dir;
+                break;
+        }
+    });
+    
+    if(host) {
+        document.getElementById('status').innerHTML = "🔵 Ожидание противника... Поделись ссылкой с братом!";
+    } else {
+        document.getElementById('status').innerHTML = "🟢 Поиск хоста...";
+    }
+}
+
+function startMatch() {
+    if(gameStarted) return;
+    gameStarted = true;
+    playing = true;
+    canvas = document.getElementById('canvas');
+    ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    // Генерация карты по seed для синхронизации
+    const seed = 1337;
+    mapData = generateMap(seed, canvas.width, canvas.height);
+    document.getElementById('m-info').innerText = mapData.curMap.n;
+    
+    rocks = mapData.rocks;
+    roadDots = mapData.roadDots;
+    lake = mapData.lake;
+    
+    // Расположение игроков
+    if(isHost) {
+        myPlayer = createPlayer(100, '#2ecc71', 150, canvas.height/2);
+        opponentPlayer = createPlayer(100, '#e74c3c', canvas.width - 150, canvas.height/2);
+    } else {
+        myPlayer = createPlayer(100, '#2ecc71', canvas.width - 150, canvas.height/2);
+        opponentPlayer = createPlayer(100, '#e74c3c', 150, canvas.height/2);
+    }
+    
+    requestAnimationFrame(gameLoop);
+    
+    // Отправка позиций каждые 50 мс
+    setInterval(() => {
+        if(gameStarted && sendAction && opponentId) {
+            sendAction({ type: 'move', x: myPlayer.x, y: myPlayer.y });
+        }
+    }, 50);
+}
+
+// Локальный игровой цикл
+function gameLoop() {
+    if(!playing || !gameStarted) return;
+    applyPhysics(myPlayer, true);
+    applyPhysics(opponentPlayer, false);
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+// Локальный ввод и обработка действий
+function setupLocalControls() {
+    const btnAtk = document.getElementById('btn-a');
+    const btnHeal = document.getElementById('btn-h');
+    btnAtk.addEventListener('pointerdown', () => {
+        if(gameStarted) trigger('atk', true, myPlayer);
+        if(sendAction) sendAction({ type: 'attack' });
+    });
+    btnHeal.addEventListener('pointerdown', () => {
+        if(gameStarted) trigger('heal', true, myPlayer);
+        if(sendAction) sendAction({ type: 'heal' });
+    });
+    
+    // Джойстики
+    let touchL = null, touchR = null;
+    window.addEventListener('touchstart', (e) => {
+        if(!gameStarted) return;
+        for(let t of e.changedTouches) {
+            if(t.clientX < window.innerWidth / 2) touchL = { id: t.identifier, sx: t.clientX, sy: t.clientY };
+            else touchR = { id: t.identifier, sx: t.clientX, sy: t.clientY };
+        }
+    });
+    window.addEventListener('touchmove', (e) => {
+        if(!gameStarted) return;
+        for(let t of e.changedTouches) {
+            if(touchL && t.identifier === touchL.id) updateJoy(t, 'stk-l', touchL, true);
+            if(touchR && t.identifier === touchR.id) updateJoy(t, 'stk-r', touchR, false);
+        }
+    });
+    window.addEventListener('touchend', (e) => {
+        if(!gameStarted) return;
+        for(let t of e.changedTouches) {
+            if(touchL && t.identifier === touchL.id) { touchL = null; resetJoy('stk-l'); lastInput = {x:0, y:0}; }
+            if(touchR && t.identifier === touchR.id) {
+                if(Math.hypot(lastInput.x, lastInput.y) > 0.3) {
+                    trigger('dash', true, myPlayer, Math.atan2(lastInput.y, lastInput.x));
+                    if(sendAction) sendAction({ type: 'dash', angle: Math.atan2(lastInput.y, lastInput.x) });
+                }
+                touchR = null; resetJoy('stk-r'); lastInput = {x:0, y:0};
+            }
+        }
+    });
+    
+    function updateJoy(t, id, start, isMove) {
+        const dx = t.clientX - start.sx, dy = t.clientY - start.sy;
+        const dst = Math.min(Math.hypot(dx, dy), 40);
+        const ang = Math.atan2(dy, dx);
+        const ix = Math.cos(ang)*(dst/40), iy = Math.sin(ang)*(dst/40);
+        document.getElementById(id).style.transform = `translate(${ix*40}px, ${iy*40}px)`;
+        if(isMove) {
+            lastInput = {x: ix, y: iy};
+            myPlayer.x += ix * SPEED;
+            myPlayer.y += iy * SPEED;
+        }
+    }
+    function resetJoy(id) { document.getElementById(id).style.transform = 'translate(0px, 0px)'; }
+}
+
+// ==================== ЗАПУСК ====================
+document.getElementById('hostBtn').onclick = () => { document.getElementById('menu').style.display = 'none'; document.getElementById('game-ui').style.display = 'block'; initMultiplayer(true); setupLocalControls(); };
+document.getElementById('joinBtn').onclick = () => { document.getElementById('menu').style.display = 'none'; document.getElementById('game-ui').style.display = 'block'; initMultiplayer(false); setupLocalControls(); };
+</script>
+</body>
+</html>
